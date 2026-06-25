@@ -1,5 +1,6 @@
 # Rust
 /target
+projects/*/target
 
 # Cargo
 Cargo.lock
@@ -21,3 +22,7 @@ Thumbs.db
 .env
 .env.local
 .env.*.local
+
+#bin
+*.exe
+*.pdb
