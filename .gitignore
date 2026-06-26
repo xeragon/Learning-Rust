@@ -1,6 +1,6 @@
 # Rust
 /target
-projects/*/target
+basics/*/target
 
 # Cargo
 Cargo.lock
