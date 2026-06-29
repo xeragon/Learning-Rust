@@ -1,0 +1,1 @@
+[Note to myself -> just read the docs for this honestly](rust-book.cs.brown.edu/ch08-00-common-collections.html)
