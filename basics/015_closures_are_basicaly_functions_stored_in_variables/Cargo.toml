@@ -1,0 +1,6 @@
+[package]
+name = "Closures_are_basicaly_functions_stored_in_variables"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
