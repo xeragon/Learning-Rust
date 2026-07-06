@@ -95,6 +95,7 @@ ping-sweep 10.0.0.0/16 | grep "192.168" | sort -u
 |--------|-------------|---------|-------|
 | `-d, --discover-subnets` | Enable subnet discovery mode | - | Tests common IPs in each subnet |
 | `-i, --common-ips <IPS>` | Common IPs to test | `1,2,3,252,253,254` | Comma-separated list |
+| `-m, --min-responses <N>` | Minimum IPs that must respond | `1` | Use 2+ to reduce false positives |
 
 ### Network Options
 
@@ -276,6 +277,12 @@ ping-sweep 10.0.0.0/16 -c 20 -t 500 -n 2
 ```bash
 # Balance speed and reliability
 ping-sweep "192.168.X" -d -c 50 -t 100 -n 2
+
+# Reduce false positives by requiring 2+ responsive IPs per subnet
+ping-sweep "192.168.X" -d -c 100 -t 50 -m 2
+
+# Maximum sensitivity (default) - detect subnets with only 1 responsive IP
+ping-sweep "192.168.X" -d -c 100 -t 50 -m 1
 ```
 
 ## Error Handling
@@ -327,6 +334,7 @@ ping-sweep 192.168.1.0/24 -c 10 -t 100
 - Some hosts may block ICMP but still be active
 - Reverse DNS resolution is platform-dependent
 - IPv6 support may vary by operating system
+- High concurrency may cause false positives - use `-m 2` or higher to reduce them
 
 ## License
 

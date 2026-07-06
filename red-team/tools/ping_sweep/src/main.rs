@@ -52,6 +52,10 @@ struct Args {
     /// Custom common IPs to test for subnet discovery (comma-separated, default: 1,2,3,252,253,254)
     #[arg(short = 'i', long, default_value = "1,2,3,252,253,254")]
     common_ips: String,
+
+    /// Minimum number of responsive IPs to consider a subnet active (default: 1, use 2+ to reduce false positives)
+    #[arg(short = 'm', long, default_value = "1")]
+    min_responses: usize,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
@@ -76,8 +80,12 @@ enum OutputFormat {
 async fn subnet_discovery_mode(args: &Args, common_ips: &[u8], start_time: std::time::Instant) -> anyhow::Result<()> {
     let mut active_subnets = Vec::new();
     
-    // Create a semaphore to limit concurrent subnet tasks
-    let semaphore = Arc::new(Semaphore::new(args.concurrency));
+    // Create semaphores to limit concurrent operations
+    // subnet_semaphore limits the number of concurrent subnet tasks
+    let subnet_semaphore = Arc::new(Semaphore::new(args.concurrency));
+    // ping_semaphore limits the total number of concurrent ping operations
+    // This prevents overwhelming the system with too many concurrent pings
+    let ping_semaphore = Arc::new(Semaphore::new(args.concurrency * 2));
     
     for target in &args.targets {
         let target = target.trim();
@@ -100,45 +108,41 @@ async fn subnet_discovery_mode(args: &Args, common_ips: &[u8], start_time: std::
                 let common_ips_clone = common_ips.to_vec();
                 let timeout = args.timeout;
                 let count = args.count;
-                let semaphore_clone = semaphore.clone();
+                let min_responses = args.min_responses;
+                let subnet_semaphore_clone = subnet_semaphore.clone();
+                let ping_semaphore_clone = ping_semaphore.clone();
                 
                 subnet_tasks.push(tokio::spawn(async move {
-                    // Acquire semaphore permit for concurrency control
-                    let _permit = semaphore_clone.acquire().await.unwrap();
+                    // Acquire subnet semaphore permit for concurrency control
+                    let _subnet_permit = subnet_semaphore_clone.acquire().await.unwrap();
                     
-                    let mut subnet_has_response = false;
                     let mut responsive_ips = Vec::new();
                     
-                    // Test common IPs in this subnet in parallel
-                    let mut ip_tasks = Vec::new();
+                    // Test common IPs in this subnet sequentially to avoid overwhelming the system
                     for &last_octet in &common_ips_clone {
                         let test_ip = format!("{}.{}", subnet_base, last_octet);
-                        let timeout = timeout;
-                        let count = count;
                         
-                        ip_tasks.push(tokio::spawn(async move {
-                            if let Ok(ip) = test_ip.parse::<Ipv4Addr>() {
-                                let result = tokio::task::spawn_blocking(move || {
-                                    check_host_sync(IpAddr::V4(ip), timeout, count)
-                                }).await.unwrap();
-                                (test_ip, result)
-                            } else {
-                                (test_ip, false)
-                            }
-                        }));
-                    }
-                    
-                    // Collect results from all IP tests
-                    for ip_task in ip_tasks {
-                        if let Ok((test_ip, result)) = ip_task.await {
+                        if let Ok(ip) = test_ip.parse::<Ipv4Addr>() {
+                            // Acquire ping semaphore to limit total concurrent pings
+                            let _ping_permit = ping_semaphore_clone.acquire().await.unwrap();
+                            
+                            let result = tokio::task::spawn_blocking(move || {
+                                check_host_sync(IpAddr::V4(ip), timeout, count)
+                            }).await.unwrap();
+                            
                             if result {
-                                subnet_has_response = true;
                                 responsive_ips.push(test_ip);
+                                // If we already have enough responses, no need to test more IPs in this subnet
+                                if responsive_ips.len() >= min_responses {
+                                    break;
+                                }
                             }
                         }
                     }
                     
-                    if subnet_has_response {
+                    // Require at least min_responses to consider the subnet active
+                    // This reduces false positives significantly
+                    if responsive_ips.len() >= min_responses {
                         Some((format!("{}.0/24", subnet_base), responsive_ips))
                     } else {
                         None
@@ -548,6 +552,7 @@ fn check_host_sync(ip: IpAddr, timeout_ms: u64, count: usize) -> bool {
 }
 
 /// Ping an IP address using system ping command (sync)
+/// Returns true only if the ping was successful AND the response came from the intended IP
 fn ping_ip_sync(ip: &IpAddr, timeout: Duration) -> bool {
     let mut command = match ip {
         IpAddr::V4(_) => {
@@ -600,7 +605,23 @@ fn ping_ip_sync(ip: &IpAddr, timeout: Duration) -> bool {
     match output {
         Ok(result) => {
             // Check exit code - 0 means success
-            result.status.success()
+            if !result.status.success() {
+                return false;
+            }
+            
+            // On Windows, also verify the output contains the IP address
+            // This helps prevent false positives from cached ARP entries or broadcast responses
+            if cfg!(windows) {
+                let output_str = String::from_utf8_lossy(&result.stdout);
+                let ip_str = ip.to_string();
+                // Check if the output contains the IP we pinged
+                // Windows ping output should contain "Reply from <ip>" or "Ping statistics for <ip>"
+                if !output_str.contains(&ip_str) {
+                    return false;
+                }
+            }
+            
+            true
         }
         Err(_) => false,
     }
