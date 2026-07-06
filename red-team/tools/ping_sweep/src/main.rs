@@ -542,7 +542,10 @@ fn check_host_sync(ip: IpAddr, timeout_ms: u64, count: usize) -> bool {
     
     for _ in 0..count {
         if ping_ip_sync(&ip, timeout) {
-            return true;
+            // Verify by pinging once more to reduce false positives
+            if ping_ip_sync(&ip, timeout) {
+                return true;
+            }
         }
         // Small delay between retries
         std::thread::sleep(Duration::from_millis(10));
@@ -604,24 +607,38 @@ fn ping_ip_sync(ip: &IpAddr, timeout: Duration) -> bool {
     
     match output {
         Ok(result) => {
-            // Check exit code - 0 means success
-            if !result.status.success() {
-                return false;
-            }
-            
-            // On Windows, also verify the output contains the IP address
-            // This helps prevent false positives from cached ARP entries or broadcast responses
+            // On Windows, we need to be more careful because the exit code might not be reliable
+            // under concurrent execution. Check the output for successful reply.
             if cfg!(windows) {
                 let output_str = String::from_utf8_lossy(&result.stdout);
                 let ip_str = ip.to_string();
-                // Check if the output contains the IP we pinged
-                // Windows ping output should contain "Reply from <ip>" or "Ping statistics for <ip>"
+                
+                // Check for successful reply in the output
+                // Windows ping output contains "Reply from <ip>" (English) or localized versions
+                // The key is that successful pings will have the IP address in the reply line
+                // and will NOT have "Request timed out" or "Délai d'attente de la demande dépassé"
+                // Also check that the statistics show received packets
+                
+                // If we see "timed out" or timeout message, it's a failure
+                if output_str.contains("timed out") || output_str.contains("dépassé") || output_str.contains("Timeout") {
+                    return false;
+                }
+                
+                // Check exit code
+                if !result.status.success() {
+                    return false;
+                }
+                
+                // Make sure the IP appears in the output (should be in reply or statistics)
                 if !output_str.contains(&ip_str) {
                     return false;
                 }
+                
+                return true;
+            } else {
+                // On Unix, just check exit code
+                result.status.success()
             }
-            
-            true
         }
         Err(_) => false,
     }
