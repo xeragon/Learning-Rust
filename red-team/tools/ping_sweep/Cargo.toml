@@ -1,0 +1,14 @@
+[package]
+name = "ping-sweep"
+version = "0.1.0"
+edition = "2021"
+authors = ["Red Team Tool"]
+description = "A fast ping sweep tool for host discovery during internal pentests"
+license = "MIT"
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+tokio = { version = "1.0", features = ["full"] }
+ipnetwork = "0.20"
+anyhow = "1.0"
+futures = "0.3"
