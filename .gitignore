@@ -3,6 +3,7 @@
 basics/*/target
 basics/*/*/target
 basics/projects/*/target
+basics/projects/*/*/target
 
 # Cargo
 Cargo.lock
