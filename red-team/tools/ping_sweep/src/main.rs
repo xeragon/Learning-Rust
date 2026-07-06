@@ -541,9 +541,22 @@ fn check_host_sync(ip: IpAddr, timeout_ms: u64, count: usize) -> bool {
     let timeout = Duration::from_millis(timeout_ms);
     
     for _ in 0..count {
+        // Add small random delay to avoid thundering herd and reduce race conditions
+        let jitter = rand::random::<u64>() % 50; // 0-49ms random delay
+        std::thread::sleep(Duration::from_millis(jitter));
+        
         if ping_ip_sync(&ip, timeout) {
-            // Verify by pinging once more to reduce false positives
-            if ping_ip_sync(&ip, timeout) {
+            // Verify by pinging multiple times to reduce false positives
+            // Require 2 out of 3 verification pings to succeed
+            let mut success_count = 0;
+            for _ in 0..3 {
+                let jitter = rand::random::<u64>() % 50;
+                std::thread::sleep(Duration::from_millis(jitter));
+                if ping_ip_sync(&ip, timeout) {
+                    success_count += 1;
+                }
+            }
+            if success_count >= 2 {
                 return true;
             }
         }
