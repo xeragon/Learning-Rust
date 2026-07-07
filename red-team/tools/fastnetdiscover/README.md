@@ -4,7 +4,7 @@ A fast, concurrent network discovery tool for internal penetration tests. Combin
 
 ## Overview
 
-`fast-netdiscover` started as a simple ICMP host-discovery tool and has grown into a multi-mode reconnaissance utility for red team operators. It can quickly identify live hosts, map active subnets, and enumerate open ports.
+`fast-netdiscover` started as a simple ICMP host-discovery tool and has grown into a multi-mode reconnaissance utility for pentesters. It can quickly identify live hosts, map active subnets, and enumerate open ports.
 
 ### Key Features
 
@@ -20,7 +20,7 @@ A fast, concurrent network discovery tool for internal penetration tests. Combin
 ### From Source
 
 ```bash
-cd ping_sweep
+cd fastnetdiscover
 
 # Build in release mode for best performance
 cargo build --release
