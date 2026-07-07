@@ -216,35 +216,48 @@ pub async fn arp_scan(
     targets: &[Ipv4Addr],
     config: ArpScanConfig,
 ) -> anyhow::Result<ArpScanResults> {
+    // No-op callback for callers that don't need streaming.
+    arp_scan_with(targets, config, |_| {}).await
+}
+
+/// Perform ARP scan, invoking `on_result` for each host the moment its scan
+/// completes (completion order). Lets callers stream results as found.
+pub async fn arp_scan_with(
+    targets: &[Ipv4Addr],
+    config: ArpScanConfig,
+    mut on_result: impl FnMut(&ArpResult),
+) -> anyhow::Result<ArpScanResults> {
     if config.verbose {
         println!("ARP scanning {} hosts...", targets.len());
     }
-    
+
     let start_time = Instant::now();
     let semaphore = Arc::new(Semaphore::new(config.concurrency));
     let mut results = Vec::with_capacity(targets.len());
-    
-    let mut tasks = Vec::new();
-    
+
+    let mut tasks = tokio::task::JoinSet::new();
+
     for target_ip in targets {
-        let permit = semaphore.clone().acquire_owned().await?;
         let config_clone = config.clone();
         let target_ip_clone = *target_ip;
-        
-        tasks.push(tokio::spawn(async move {
-            let result = tokio::task::spawn_blocking(move || {
+        let semaphore_clone = semaphore.clone();
+
+        tasks.spawn(async move {
+            let permit = semaphore_clone.acquire_owned().await.unwrap();
+            tokio::task::spawn_blocking(move || {
                 let result = scan_single_arp(target_ip_clone, &config_clone);
                 drop(permit);
                 result
-            }).await.unwrap();
-            result
-        }));
+            }).await.unwrap()
+        });
     }
-    
-    for task in tasks {
-        results.push(task.await?);
+
+    while let Some(joined) = tasks.join_next().await {
+        let result = joined?;
+        on_result(&result);
+        results.push(result);
     }
-    
+
     let live_count = results.iter().filter(|r| r.is_alive).count();
     
     let scan_results = ArpScanResults {

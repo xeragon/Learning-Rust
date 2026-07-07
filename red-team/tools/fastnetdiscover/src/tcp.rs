@@ -112,14 +112,14 @@ async fn scan_port_connect(
         },
         Ok(Err(e)) => {
             // Check if it's a connection refused (closed) or timeout (filtered)
-            let is_filtered = matches!(
+            let _is_filtered = matches!(
                 e.kind(),
                 ErrorKind::ConnectionRefused | ErrorKind::TimedOut | ErrorKind::ConnectionReset
             );
             
             // On Unix, ConnectionRefused means closed, Timeout means filtered
             // On Windows, behavior may differ
-            let is_open = false;
+            let _is_open = false;
             let is_filtered = matches!(e.kind(), ErrorKind::TimedOut);
             
             TcpPortResult {
@@ -175,37 +175,50 @@ pub async fn tcp_scan(
     targets: &[IpAddr],
     config: TcpScanConfig,
 ) -> anyhow::Result<TcpScanResults> {
+    // No-op callback for callers that don't need streaming.
+    tcp_scan_with(targets, config, |_| {}).await
+}
+
+/// Perform TCP scan, invoking `on_host` for each host the moment its scan
+/// completes (completion order, not target order). This lets callers stream
+/// results as they are found instead of waiting for the whole scan.
+pub async fn tcp_scan_with(
+    targets: &[IpAddr],
+    config: TcpScanConfig,
+    mut on_host: impl FnMut(&TcpHostResult),
+) -> anyhow::Result<TcpScanResults> {
     let start_time = Instant::now();
     let semaphore = Arc::new(Semaphore::new(config.concurrency));
-    
+
     if config.verbose {
-        println!("TCP scanning {} hosts, {} ports each, concurrency: {}", 
+        println!("TCP scanning {} hosts, {} ports each, concurrency: {}",
                  targets.len(), config.ports.len(), config.concurrency);
     }
-    
-    let mut host_tasks = Vec::new();
-    
+
+    let mut host_tasks = tokio::task::JoinSet::new();
+
     for ip in targets {
         let ip_clone = *ip;
         let ports_clone = config.ports.clone();
         let config_clone = config.clone();
         let semaphore_clone = semaphore.clone();
-        
-        host_tasks.push(tokio::spawn(async move {
+
+        host_tasks.spawn(async move {
             let _permit = semaphore_clone.acquire().await.unwrap();
             scan_host_tcp(ip_clone, &ports_clone, &config_clone).await
-        }));
+        });
     }
-    
+
     let mut hosts = Vec::with_capacity(targets.len());
     let mut total_open_ports = 0;
-    
-    for task in host_tasks {
-        let host_result = task.await?;
+
+    while let Some(joined) = host_tasks.join_next().await {
+        let host_result = joined?;
         total_open_ports += host_result.open_ports.len();
+        on_host(&host_result);
         hosts.push(host_result);
     }
-    
+
     let live_hosts = hosts.iter().filter(|h| h.is_alive).count();
     
     let results = TcpScanResults {

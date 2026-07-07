@@ -6,14 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
 
-// Import our new modules
-use crate::arp::{arp_scan, ArpScanConfig, ArpScanResults};
-use crate::tcp::{tcp_scan, TcpScanConfig, TcpScanResults, TcpScanType, get_default_ports};
-use crate::udp::{udp_scan, UdpScanConfig, UdpScanResults, get_default_udp_ports};
-
-mod arp;
-mod tcp;
-mod udp;
+// Import from the library crate
+use fast_netdiscover::arp::{arp_scan_with, ArpScanConfig, ArpScanResults, ArpResult};
+use fast_netdiscover::tcp::{self, tcp_scan_with, TcpScanConfig, TcpScanResults, TcpScanType, TcpHostResult, get_default_ports};
+use fast_netdiscover::udp::{self, udp_scan_with, UdpScanConfig, UdpScanResults, UdpHostResult, get_default_udp_ports};
 
 /// Scan type for discovery
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
@@ -163,6 +159,63 @@ struct Args {
     output_file: Option<String>,
 }
 
+/// Print a single live host as it is discovered (ping/ARP paths).
+/// Respects `--format`; the summary count headers are printed separately at the end.
+fn emit_host(ip: IpAddr, format: OutputFormat) {
+    match format {
+        OutputFormat::Ip | OutputFormat::Host | OutputFormat::Subnet => println!("{}", ip),
+        OutputFormat::Full | OutputFormat::Detailed => println!("    - {} is up", ip),
+    }
+}
+
+/// Print a single TCP host result as its scan completes.
+/// Honors `--live-only` and `--format`.
+fn emit_tcp_host(host: &TcpHostResult, format: OutputFormat, live_only: bool) {
+    if !host.is_alive {
+        return;
+    }
+    match format {
+        OutputFormat::Ip | OutputFormat::Host | OutputFormat::Subnet => println!("{}", host.ip),
+        OutputFormat::Full | OutputFormat::Detailed => {
+            println!("    - {}: {:?}", host.ip, host.open_ports)
+        }
+    }
+    let _ = live_only; // TCP only ever emits alive hosts, so live_only is always satisfied
+}
+
+/// Print a single UDP host result as its scan completes.
+fn emit_udp_host(host: &UdpHostResult, format: OutputFormat, live_only: bool) {
+    if !host.is_alive {
+        return;
+    }
+    match format {
+        OutputFormat::Ip | OutputFormat::Host | OutputFormat::Subnet => println!("{}", host.ip),
+        OutputFormat::Full | OutputFormat::Detailed => {
+            println!("    - {}: {:?}", host.ip, host.open_ports)
+        }
+    }
+    let _ = live_only;
+}
+
+/// Print a single active subnet as it is discovered, respecting `--format`.
+fn emit_subnet(subnet_info: &(String, Vec<String>), format: OutputFormat) {
+    let (subnet, ips) = subnet_info;
+    match format {
+        OutputFormat::Ip | OutputFormat::Host => {
+            for ip in ips {
+                println!("{}", ip);
+            }
+        }
+        OutputFormat::Subnet => println!("{}", subnet),
+        OutputFormat::Full | OutputFormat::Detailed => {
+            println!("[+] Subnet {} is active", subnet);
+            for ip in ips {
+                println!("    - {} is up", ip);
+            }
+        }
+    }
+}
+
 /// Perform subnet discovery mode
 async fn subnet_discovery_mode(args: &Args, common_ips: &[u8], start_time: std::time::Instant) -> anyhow::Result<()> {
     let mut active_subnets = Vec::new();
@@ -181,9 +234,8 @@ async fn subnet_discovery_mode(args: &Args, common_ips: &[u8], start_time: std::
                         base_prefix, start_octet, end_octet, subnet_count, args.concurrency, args.timeout);
             }
             
-            let mut discovered_subnets = Vec::new();
-            let mut subnet_tasks = Vec::new();
-            
+            let mut subnet_tasks = tokio::task::JoinSet::new();
+
             for octet in start_octet..=end_octet {
                 let subnet_base = format!("{}.{}", base_prefix, octet);
                 let common_ips_clone = common_ips.to_vec();
@@ -192,20 +244,20 @@ async fn subnet_discovery_mode(args: &Args, common_ips: &[u8], start_time: std::
                 let min_responses = args.min_responses;
                 let subnet_semaphore_clone = subnet_semaphore.clone();
                 let ping_semaphore_clone = ping_semaphore.clone();
-                
-                subnet_tasks.push(tokio::spawn(async move {
+
+                subnet_tasks.spawn(async move {
                     let _subnet_permit = subnet_semaphore_clone.acquire().await.unwrap();
                     let mut responsive_ips = Vec::new();
-                    
+
                     for &last_octet in &common_ips_clone {
                         let test_ip = format!("{}.{}", subnet_base, last_octet);
-                        
+
                         if let Ok(ip) = test_ip.parse::<Ipv4Addr>() {
                             let _ping_permit = ping_semaphore_clone.acquire().await.unwrap();
                             let result = tokio::task::spawn_blocking(move || {
                                 check_host_sync(IpAddr::V4(ip), timeout, count)
                             }).await.unwrap();
-                            
+
                             if result {
                                 responsive_ips.push(test_ip);
                                 if responsive_ips.len() >= min_responses {
@@ -214,59 +266,27 @@ async fn subnet_discovery_mode(args: &Args, common_ips: &[u8], start_time: std::
                             }
                         }
                     }
-                    
+
                     if responsive_ips.len() >= min_responses {
                         Some((format!("{}.0/24", subnet_base), responsive_ips))
                     } else {
                         None
                     }
-                }));
+                });
             }
-            
-            for task in subnet_tasks {
-                if let Ok(Some(subnet_info)) = task.await {
-                    discovered_subnets.push(subnet_info);
+
+            // Emit each active subnet the moment its probes complete (completion order).
+            while let Some(joined) = subnet_tasks.join_next().await {
+                if let Ok(Some(subnet_info)) = joined {
+                    emit_subnet(&subnet_info, args.format);
+                    active_subnets.push(subnet_info);
                 }
             }
-            
-            active_subnets.extend(discovered_subnets);
         } else {
             eprintln!("Invalid subnet pattern for discovery: {}", target);
         }
     }
-    
-    // Output results based on format
-    match args.format {
-        OutputFormat::Ip | OutputFormat::Host => {
-            for (_subnet, ips) in &active_subnets {
-                for ip in ips {
-                    println!("{}", ip);
-                }
-            }
-        }
-        OutputFormat::Full => {
-            for (subnet, ips) in &active_subnets {
-                println!("[+] Subnet {} is active", subnet);
-                for ip in ips {
-                    println!("    - {} is up", ip);
-                }
-            }
-        }
-        OutputFormat::Subnet => {
-            for (subnet, _) in &active_subnets {
-                println!("{}", subnet);
-            }
-        }
-        OutputFormat::Detailed => {
-            for (subnet, ips) in &active_subnets {
-                println!("[+] Subnet {} is active", subnet);
-                for ip in ips {
-                    println!("    - {} is up", ip);
-                }
-            }
-        }
-    }
-    
+
     if args.verbose {
         let elapsed = start_time.elapsed();
         println!("\nSubnet discovery complete. Found {} active subnets in {:.2}s.", active_subnets.len(), elapsed.as_secs_f64());
@@ -576,34 +596,38 @@ async fn perform_ping_sweep(
     start_time: std::time::Instant,
 ) -> anyhow::Result<Vec<IpAddr>> {
     if args.verbose {
-        println!("Scanning {} hosts with {} concurrent pings, {}ms timeout...", 
+        println!("Scanning {} hosts with {} concurrent pings, {}ms timeout...",
                  targets.len(), args.concurrency, args.timeout);
     }
-    
-    let mut tasks = Vec::new();
-    
+
+    if matches!(args.format, OutputFormat::Full | OutputFormat::Detailed) {
+        println!("[+] Ping sweep results:");
+    }
+
+    let mut tasks = tokio::task::JoinSet::new();
+
     for ip in targets {
         let ip_clone = *ip;
         let timeout = args.timeout;
         let count = args.retries;
-        
-        tasks.push(tokio::spawn(async move {
+
+        tasks.spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
                 check_host_sync(ip_clone, timeout, count)
             }).await.unwrap();
             (ip_clone, result)
-        }));
+        });
     }
-    
+
+    // Stream each responsive host the instant its probe completes (completion order).
     let mut responsive_hosts = Vec::new();
-    for task in tasks {
-        if let Ok((ip, result)) = task.await {
-            if result {
-                responsive_hosts.push(ip);
-            }
+    while let Some(joined) = tasks.join_next().await {
+        if let Ok((ip, true)) = joined {
+            emit_host(ip, args.format);
+            responsive_hosts.push(ip);
         }
     }
-    
+
     if args.verbose {
         let elapsed = start_time.elapsed();
         println!("\nPing sweep complete. Found {} responsive hosts in {:.2}s.", 
@@ -617,7 +641,7 @@ async fn perform_ping_sweep(
 async fn perform_arp_scan(
     targets: &[IpAddr],
     args: &Args,
-    start_time: std::time::Instant,
+    _start_time: std::time::Instant,
 ) -> anyhow::Result<ArpScanResults> {
     // Convert to IPv4 only (ARP is IPv4 only)
     let ipv4_targets: Vec<Ipv4Addr> = targets
@@ -639,15 +663,20 @@ async fn perform_arp_scan(
         retries: args.retries,
         verbose: args.verbose,
     };
-    
-    arp_scan(&ipv4_targets, config).await
+
+    let format = args.format;
+    arp_scan_with(&ipv4_targets, config, |result: &ArpResult| {
+        if result.is_alive {
+            emit_host(IpAddr::V4(result.ip), format);
+        }
+    }).await
 }
 
 /// Perform TCP scan
 async fn perform_tcp_scan(
     targets: &[IpAddr],
     args: &Args,
-    start_time: std::time::Instant,
+    _start_time: std::time::Instant,
 ) -> anyhow::Result<TcpScanResults> {
     // Parse TCP ports
     let ports = if let Some(port_args) = &args.tcp_ports {
@@ -670,15 +699,23 @@ async fn perform_tcp_scan(
         verbose: args.verbose,
         retries: args.retries,
     };
-    
-    tcp_scan(targets, config).await
+
+    if matches!(args.format, OutputFormat::Full | OutputFormat::Detailed) {
+        println!("[+] TCP scan results:");
+    }
+
+    let format = args.format;
+    let live_only = args.live_only;
+    tcp_scan_with(targets, config, |host: &TcpHostResult| {
+        emit_tcp_host(host, format, live_only);
+    }).await
 }
 
 /// Perform UDP scan
 async fn perform_udp_scan(
     targets: &[IpAddr],
     args: &Args,
-    start_time: std::time::Instant,
+    _start_time: std::time::Instant,
 ) -> anyhow::Result<UdpScanResults> {
     // Parse UDP ports
     let ports = if let Some(port_args) = &args.udp_ports {
@@ -695,11 +732,25 @@ async fn perform_udp_scan(
         retries: args.retries,
         use_service_probes: args.udp_service_probes,
     };
-    
-    udp_scan(targets, config).await
+
+    if matches!(args.format, OutputFormat::Full | OutputFormat::Detailed) {
+        println!("[+] UDP scan results:");
+    }
+
+    let format = args.format;
+    let live_only = args.live_only;
+    udp_scan_with(targets, config, |host: &UdpHostResult| {
+        emit_udp_host(host, format, live_only);
+    }).await
 }
 
-/// Output scan results based on format
+/// Print end-of-run aggregate counts.
+///
+/// Per-host lines are streamed live as hosts are discovered (see `emit_host`,
+/// `emit_tcp_host`, `emit_udp_host` and the phase headers in the `perform_*`
+/// wrappers). Only counts that can be known solely at the end are printed here,
+/// and only for the `Detailed` format. Other formats stream everything and have
+/// no end-of-run output.
 fn output_results(
     args: &Args,
     responsive_hosts: &[IpAddr],
@@ -707,75 +758,22 @@ fn output_results(
     udp_results: Option<&UdpScanResults>,
     _arp_results: Option<&ArpScanResults>,
 ) {
-    match args.format {
-        OutputFormat::Ip => {
-            for ip in responsive_hosts {
-                println!("{}", ip);
-            }
-            
-            if let Some(tcp) = tcp_results {
-                for host in &tcp.hosts {
-                    if host.is_alive {
-                        println!("{}", host.ip);
-                    }
-                }
-            }
-        }
-        OutputFormat::Host => {
-            for ip in responsive_hosts {
-                println!("{}", ip);
-            }
-        }
-        OutputFormat::Full => {
-            if !responsive_hosts.is_empty() {
-                println!("[+] Ping sweep results:");
-                for ip in responsive_hosts {
-                    println!("    - {} is up", ip);
-                }
-            }
-            
-            if let Some(tcp) = tcp_results {
-                println!("[+] TCP scan results:");
-                for host in &tcp.hosts {
-                    if host.is_alive {
-                        println!("    - {}: {:?}", host.ip, host.open_ports);
-                    }
-                }
-            }
-        }
-        OutputFormat::Subnet => {
-            for ip in responsive_hosts {
-                println!("{}", ip);
-            }
-        }
-        OutputFormat::Detailed => {
-            if !responsive_hosts.is_empty() {
-                println!("[+] Ping sweep found {} live hosts:", responsive_hosts.len());
-                for ip in responsive_hosts {
-                    println!("    - {}", ip);
-                }
-            }
-            
-            if let Some(tcp) = tcp_results {
-                println!("[+] TCP scan found {} live hosts with {} open ports:", 
-                         tcp.live_hosts, tcp.total_open_ports);
-                for host in &tcp.hosts {
-                    if host.is_alive {
-                        println!("    - {}: {:?}", host.ip, host.open_ports);
-                    }
-                }
-            }
-            
-            if let Some(udp) = udp_results {
-                println!("[+] UDP scan found {} live hosts with {} responding ports:", 
-                         udp.live_hosts, udp.total_responding_ports);
-                for host in &udp.hosts {
-                    if host.is_alive {
-                        println!("    - {}: {:?}", host.ip, host.open_ports);
-                    }
-                }
-            }
-        }
+    if args.format != OutputFormat::Detailed {
+        return;
+    }
+
+    if !responsive_hosts.is_empty() {
+        println!("[+] Ping sweep found {} live hosts", responsive_hosts.len());
+    }
+
+    if let Some(tcp) = tcp_results {
+        println!("[+] TCP scan found {} live hosts with {} open ports",
+                 tcp.live_hosts, tcp.total_open_ports);
+    }
+
+    if let Some(udp) = udp_results {
+        println!("[+] UDP scan found {} live hosts with {} responding ports",
+                 udp.live_hosts, udp.total_responding_ports);
     }
 }
 
@@ -790,7 +788,7 @@ async fn perform_combined_scan(
     let mut arp_results = None;
     
     // Always start with ping sweep
-    let mut responsive_hosts = perform_ping_sweep(targets, args, start_time).await?;
+    let responsive_hosts = perform_ping_sweep(targets, args, start_time).await?;
     
     // Then perform TCP scan on live hosts
     if !responsive_hosts.is_empty() {
@@ -818,13 +816,12 @@ async fn perform_full_scan(
 ) -> anyhow::Result<(Vec<IpAddr>, Option<TcpScanResults>, Option<UdpScanResults>, Option<ArpScanResults>)> {
     let mut tcp_results = None;
     let mut udp_results = None;
-    let mut arp_results = None;
-    
+
     // Perform ping sweep
     let mut responsive_hosts = perform_ping_sweep(targets, args, start_time).await?;
-    
+
     // Perform ARP scan on all targets (not just responsive ones)
-    arp_results = Some(perform_arp_scan(targets, args, start_time).await?);
+    let arp_results = Some(perform_arp_scan(targets, args, start_time).await?);
     
     // Combine ping and ARP results
     if let Some(arp) = &arp_results {

@@ -335,37 +335,49 @@ pub async fn udp_scan(
     targets: &[IpAddr],
     config: UdpScanConfig,
 ) -> anyhow::Result<UdpScanResults> {
+    // No-op callback for callers that don't need streaming.
+    udp_scan_with(targets, config, |_| {}).await
+}
+
+/// Perform UDP scan, invoking `on_host` for each host the moment its scan
+/// completes (completion order). Lets callers stream results as found.
+pub async fn udp_scan_with(
+    targets: &[IpAddr],
+    config: UdpScanConfig,
+    mut on_host: impl FnMut(&UdpHostResult),
+) -> anyhow::Result<UdpScanResults> {
     let start_time = Instant::now();
     let semaphore = Arc::new(Semaphore::new(config.concurrency));
-    
+
     if config.verbose {
-        println!("UDP scanning {} hosts, {} ports each, concurrency: {}", 
+        println!("UDP scanning {} hosts, {} ports each, concurrency: {}",
                  targets.len(), config.ports.len(), config.concurrency);
     }
-    
-    let mut host_tasks = Vec::new();
-    
+
+    let mut host_tasks = tokio::task::JoinSet::new();
+
     for ip in targets {
         let ip_clone = *ip;
         let ports_clone = config.ports.clone();
         let config_clone = config.clone();
         let semaphore_clone = semaphore.clone();
-        
-        host_tasks.push(tokio::spawn(async move {
+
+        host_tasks.spawn(async move {
             let _permit = semaphore_clone.acquire().await.unwrap();
             scan_host_udp(ip_clone, &ports_clone, &config_clone).await
-        }));
+        });
     }
-    
+
     let mut hosts = Vec::with_capacity(targets.len());
     let mut total_responding_ports = 0;
-    
-    for task in host_tasks {
-        let host_result = task.await?;
+
+    while let Some(joined) = host_tasks.join_next().await {
+        let host_result = joined?;
         total_responding_ports += host_result.open_ports.len();
+        on_host(&host_result);
         hosts.push(host_result);
     }
-    
+
     let live_hosts = hosts.iter().filter(|h| h.is_alive).count();
     
     let results = UdpScanResults {
