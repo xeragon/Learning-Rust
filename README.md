@@ -21,7 +21,7 @@ Repository for resources, code, and tools used to learn Rust for offensive secur
 Learning-Rust/
 ├── basics/        # Code snippets and notes about Rust basics -> primarly taken from [The Rust Book](https://rust-book.cs.brown.edu)
 ├── red-team/      # Source code & snippets for tools and PoCs
-│   ├── tools/     # Full tools (scanners, etc.)
+│   ├── tools/     # Just maps to my public tools built in rust
 │   ├── poc/       # Proof of Concepts
 │   └── snippets/   # Code snippets that might be usefull
 └── resources/     # Downloaded resources (PDFs, slides)

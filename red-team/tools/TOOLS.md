@@ -1,0 +1,1 @@
+[Fast Internal Network Discovery Tool](https://github.com/xeragon/fast-netdiscover)
