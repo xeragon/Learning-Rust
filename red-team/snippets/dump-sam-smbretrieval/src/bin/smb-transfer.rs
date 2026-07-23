@@ -3,6 +3,8 @@ use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr::null;
 use std::path::Path;
+use std::fs;
+use std::io;
 use windows_sys::Win32::Foundation::{GENERIC_READ, GetLastError};
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, OPEN_EXISTING, FILE_SHARE_READ,
@@ -41,6 +43,19 @@ fn main() {
 
     // Success
     std::process::exit(0);
+}
+
+fn read_hive_file(path: &str) -> Result<Vec<u8>, i32> {
+    match fs::read(path) {
+        Ok(data) => Ok(data),
+        Err(e) => {
+            match e.kind() {
+                io::ErrorKind::NotFound => Err(1),           // File not found
+                io::ErrorKind::PermissionDenied => Err(2),   // Access denied
+                _ => Err(6),                                  // Other errors
+            }
+        }
+    }
 }
 
 fn locate_hives() -> Result<[String; 3], i32> {
