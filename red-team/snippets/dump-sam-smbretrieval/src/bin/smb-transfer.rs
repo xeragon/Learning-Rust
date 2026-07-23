@@ -11,6 +11,8 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
 
+const NO_ERROR: u32 = 0;
+
 fn main() {
     let args: Vec<String> = env::args().collect();
 
@@ -96,10 +98,48 @@ fn get_system_directory() -> Result<String, i32> {
     Ok(String::from_utf16_lossy(&buffer).to_string())
 }
 
-fn connect_smb(path: &str, user: &str, pass: &str) -> Result<(), i32> {
-    Err(6) // Placeholder
+fn connect_smb(path: &str, username: &str, password: &str) -> Result<(), i32> {
+    let wide_path: Vec<u16> = OsStr::new(path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let wide_user: Vec<u16> = OsStr::new(username)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let wide_pass: Vec<u16> = OsStr::new(password)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let result = unsafe {
+        WNetAddConnectionW(
+            wide_path.as_ptr(),
+            wide_pass.as_ptr(),
+            wide_user.as_ptr(),
+            0, // dwFlags: 0 for no special options
+        )
+    };
+
+    match result {
+        NO_ERROR => Ok(()),
+        1326 => Err(3), // ERROR_LOGON_FAILURE — auth failed
+        1231 => Err(4), // ERROR_NET_UNREACHABLE — path not found
+        _ => Err(6),    // Other errors
+    }
 }
 
 fn transfer_hives(path: &str) -> Result<(), i32> {
     Err(6) // Placeholder
+}
+
+unsafe extern "system" {
+    fn WNetAddConnectionW(
+        lpRemoteName: *const u16,
+        lpPassword: *const u16,
+        lpUserName: *const u16,
+        dwFlags: u32,
+    ) -> u32;
 }
