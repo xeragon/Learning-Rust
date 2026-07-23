@@ -12,4 +12,13 @@ windows-sys = { version = "0.52", features = [
     "Win32_Storage",
     "Win32_Storage_FileSystem",
     "Win32_System_SystemInformation",
+    "Win32_NetworkManagement_IpHelper",
 ] }
+
+[[bin]]
+name = "dump-sam-smbretrieval"
+path = "src/main.rs"
+
+[[bin]]
+name = "smb-transfer"
+path = "src/bin/smb-transfer.rs"
