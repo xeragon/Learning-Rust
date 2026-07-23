@@ -126,6 +126,7 @@ fn connect_smb(path: &str, username: &str, password: &str) -> Result<(), i32> {
     match result {
         NO_ERROR => Ok(()),
         1326 => Err(3), // ERROR_LOGON_FAILURE — auth failed
+        53 | 67 => Err(4), // ERROR_BAD_NETPATH | ERROR_BAD_NET_NAME — SMB path not found
         1231 => Err(6), // Not a standard SMB path error
         _ => Err(6),    // Other errors
     }
@@ -166,7 +167,7 @@ fn write_to_smb(smb_path: &str, filename: &str, data: &[u8]) -> Result<(), i32> 
     if file_handle == -1 {
         let error = unsafe { GetLastError() };
         return match error {
-            5 => Err(2),    // Access denied
+            5 => Err(5),    // ERROR_ACCESS_DENIED on SMB path = write permission error
             112 => Err(5),  // Not enough space
             _ => Err(6),    // Other errors
         };
