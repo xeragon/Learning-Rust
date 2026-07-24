@@ -58,7 +58,7 @@ impl SmtWriter {
                 0,
                 std::ptr::null_mut(),
                 CREATE_ALWAYS,
-                0,
+                FILE_ATTRIBUTE_NORMAL,
                 0,
             );
 
@@ -88,6 +88,7 @@ impl SmtWriter {
 }
 
 const GENERIC_WRITE: u32 = 0x40000000;
+const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
 
 unsafe extern "system" {
     fn WNetAddConnectionW(
