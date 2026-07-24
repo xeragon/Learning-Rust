@@ -1,0 +1,1 @@
+// Placeholder module - will be implemented in Task 3
